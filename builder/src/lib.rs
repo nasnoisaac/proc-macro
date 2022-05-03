@@ -21,16 +21,18 @@ fn do_expand(input: &syn::DeriveInput) -> syn::Result<proc_macro::TokenStream> {
     let fields = get_fields_from_derive_input(input)?;
     let builder_struct_fields_def = generate_builder_struct_fields_def(fields)?;
     let builder_struct_factory_init_clauses = generate_builder_struct_factory_init_clauses(fields)?;
-    let builder_call_setters = generate_buidler_call_setters(fields)?; 
-    //eprint!("{:#?}", builder_call_setters);
+    let builder_call_setters = generate_buidler_call_setters(fields)?;
+    let build_function = generate_build_function(fields, struct_ident)?;
 
     let expanded = quote! {
         pub struct #builder_ident {
             #builder_struct_fields_def
         }
-        
+
         impl #builder_ident {
             #(#builder_call_setters)*
+
+            #build_function
         }
 
         impl #struct_ident {
@@ -90,15 +92,15 @@ fn generate_builder_struct_factory_init_clauses(
     Ok(init_clauses)
 }
 
-fn  generate_buidler_call_setters(
-        fields: &StructFields,
-    ) -> syn::Result<Vec<proc_macro2::TokenStream>> {
-    let call_setters: Vec<_> =  fields
+fn generate_buidler_call_setters(
+    fields: &StructFields,
+) -> syn::Result<Vec<proc_macro2::TokenStream>> {
+    let call_setters: Vec<_> = fields
         .iter()
         .map(|f| {
             let ident = &f.ident;
             let ty = &f.ty;
-            quote!{
+            quote! {
                fn #ident(&mut self, #ident: #ty) -> &mut Self {
                    self.#ident = std::option::Option::Some(#ident);
                    self
@@ -109,3 +111,43 @@ fn  generate_buidler_call_setters(
     Ok(call_setters)
 }
 
+fn generate_build_function(
+    fields: &StructFields,
+    struct_ident: &syn::Ident,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+
+    let mut check_pieces = Vec::new();
+    for idx in 0..idents.len() {
+        let ident = idents[idx];
+        let piece = quote! {
+            if self.#ident.is_none(){
+                let err = format!{"{} field missing", stringify!(#ident)};
+                return std::result::Result::Err(err.into())
+            }
+        };
+        check_pieces.push(piece);
+    }
+
+    let mut fill_result_clauses = Vec::new();
+    for idx in 0..idents.len() {
+        let ident = idents[idx];
+        fill_result_clauses.push(quote! {
+           #ident: self.#ident.clone().unwrap()
+        });
+    }
+
+    let build_func = quote! {
+        pub fn build(&mut self) -> std::result::Result<#struct_ident, std::boxed::Box<dyn std::error::Error>> {
+            #(#check_pieces)*
+
+            let ret = #struct_ident {
+                #(#fill_result_clauses),*
+            };
+
+            std::result::Result::Ok(ret)
+        }
+
+    };
+    Ok(build_func)
+}
