@@ -68,10 +68,21 @@ fn generate_builder_struct_fields_def(
     fields: &StructFields,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
-    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+    //let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+    let types: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            if let Some(inner_ty) = get_optional_inner_type(&f.ty) {
+                quote!(std::option::Option<#inner_ty>)
+            } else {
+                let ty = &f.ty;
+                quote!(std::option::Option<#ty>)
+            }
+        })
+        .collect();
 
     let token_stream = quote! {
-        #(#idents: std::option::Option<#types>),*
+        #(#idents: #types),*
     };
     Ok(token_stream)
 }
@@ -100,11 +111,20 @@ fn generate_buidler_call_setters(
         .map(|f| {
             let ident = &f.ident;
             let ty = &f.ty;
-            quote! {
-               fn #ident(&mut self, #ident: #ty) -> &mut Self {
-                   self.#ident = std::option::Option::Some(#ident);
-                   self
-               }
+            if let Some(inner_ty) = get_optional_inner_type(ty) {
+                quote! {
+                    fn #ident(&mut self, #ident: #inner_ty) -> &mut Self {
+                        self.#ident = std::option::Option::Some(#ident);
+                        self
+                    }
+                }
+            } else {
+                quote! {
+                   fn #ident(&mut self, #ident: #ty) -> &mut Self {
+                       self.#ident = std::option::Option::Some(#ident);
+                       self
+                   }
+                }
             }
         })
         .collect();
@@ -116,25 +136,34 @@ fn generate_build_function(
     struct_ident: &syn::Ident,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let idents: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    let types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
 
     let mut check_pieces = Vec::new();
     for idx in 0..idents.len() {
         let ident = idents[idx];
-        let piece = quote! {
-            if self.#ident.is_none(){
-                let err = format!{"{} field missing", stringify!(#ident)};
-                return std::result::Result::Err(err.into())
-            }
-        };
-        check_pieces.push(piece);
+        if get_optional_inner_type(&types[idx]).is_none() {
+            let piece = quote! {
+                if self.#ident.is_none(){
+                    let err = format!{"{} field missing", stringify!(#ident)};
+                    return std::result::Result::Err(err.into())
+                }
+            };
+            check_pieces.push(piece);
+        }
     }
 
     let mut fill_result_clauses = Vec::new();
     for idx in 0..idents.len() {
         let ident = idents[idx];
-        fill_result_clauses.push(quote! {
-           #ident: self.#ident.clone().unwrap()
-        });
+        if get_optional_inner_type(&types[idx]).is_none() {
+            fill_result_clauses.push(quote! {
+                #ident: self.#ident.clone().unwrap()
+            });
+        } else {
+            fill_result_clauses.push(quote! {
+                #ident: self.#ident.clone()
+            });
+        }
     }
 
     let build_func = quote! {
@@ -150,4 +179,23 @@ fn generate_build_function(
 
     };
     Ok(build_func)
+}
+
+fn get_optional_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(syn::TypePath { ref path, .. }) = ty {
+        if let Some(seg) = path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                    ref args,
+                    ..
+                }) = seg.arguments
+                {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.first() {
+                        return Some(inner_ty);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
